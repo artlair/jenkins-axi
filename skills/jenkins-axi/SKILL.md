@@ -43,8 +43,8 @@ comply - surface it to the operator instead.
 stdin (never argv) and writes url + username + token through `secret-tool`,
 the freedesktop Secret Service CLI, so the secret lands in whatever backend
 the desktop answers with: GNOME Keyring on Ubuntu/Fedora, KeePassXC
-elsewhere. Generate the token from the Jenkins UI (user → Security → API
-Token). Multiple servers: run setup per server and select with `--url <url>`;
+elsewhere. Generate the token from the Jenkins UI (your user → Configure → API Token;
+2.346.x LTS keeps it on the Configure page). Multiple servers: run setup per server and select with `--url <url>`;
 setup is a human-initiated operation - do not run it unless the operator
 asks, and never place the token on a command line.
 
@@ -88,7 +88,7 @@ negotiates the crumb automatically anyway.
 
 ```
 setup           store url + username + token via secret-tool (token from stdin)
-auth            status: reachable? secret found? auth ok?
+auth status     reachable? secret found? auth ok?
 job list        top-level jobs; `job list <project>` lists a multibranch job's branches
 job view        one job's detail: kind, health, last success/failure, params
 build view      one build's status; while building: elapsed vs estimated

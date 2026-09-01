@@ -32,8 +32,9 @@ jenkins-axi setup --url http://jenkins.example.net:8080 --username youruser
 # API token read from stdin (paste, then Enter)
 ```
 
-Generate the API token from the Jenkins UI (Jenkins → user → Security → API
-Token). The token is read from stdin, never argv, and stored through
+Generate the API token from the Jenkins UI: your user → Configure → API Token
+→ Add new Token (on Jenkins 2.346.x LTS it lives on the Configure page; the
+separate per-user Security page came in a later release). The token is read from stdin, never argv, and stored through
 `secret-tool` into the backend your session bus answers with. The CLI reads
 it back with `secret-tool search --all service jenkins-axi`, so any Secret
 Service provider works. Multiple servers: add entries with different `url`
