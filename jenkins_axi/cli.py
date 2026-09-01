@@ -1,9 +1,10 @@
 """jenkins-axi CLI.
 
 Thin wiring per the house style: argparse dispatch -> api operations -> TOON
-render. Every handler is the same shape, so the logic they orchestrate is
-tested in api.py (through the client/auth seams), not here.
-
+render. The E2E suite (tests/) drives THIS entrypoint as a subprocess against
+fakes for the whole external world, per the house "test the logic, not the
+entrypoint" ask: the logic lives in api/client/auth, exercised here through
+the real wiring.
 Subcommands are noun-first like the other axi CLIs (auth status, job list,
 build view), which argparse models as nested subparsers. Flags come AFTER the
 subcommand; --url retargets to another stored server.
@@ -23,7 +24,7 @@ import sys
 import time
 
 from jenkins_axi import api, auth, render
-from jenkins_axi.client import JenkinsClient, JobRef
+from jenkins_axi.client import DEFAULT_TIMEOUT, JenkinsClient, JobRef
 from jenkins_axi.errors import AuthFailed, AxiError, Unreachable
 from jenkins_axi.toon import EXIT_OK, EXIT_USAGE, Toon, fail
 
@@ -46,28 +47,36 @@ def secret_timeout() -> float:
 
 def client_for(args) -> JenkinsClient:
     """Resolve the stored credential (failing closed with the remedy inline)
-    and build the client for it."""
-    entry = auth.resolve(args.url, timeout=secret_timeout())
-    return JenkinsClient(entry.url, entry.username, entry.token, timeout=args.timeout)
+    and build the client for it. The leaf options are default=SUPPRESS'd
+    (fresh-eyes #5), so getattr with the root's values."""
+    url = getattr(args, "url", None)
+    timeout = getattr(args, "timeout", DEFAULT_TIMEOUT)
+    entry = auth.resolve(url, timeout=secret_timeout())
+    return JenkinsClient(entry.url, entry.username, entry.token, timeout=timeout)
 
 
-def _now_ms() -> int:
+def now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def _when(timestamp_ms: int | None, now_ms: int) -> str:
+def when(timestamp_ms: int | None, now_ms: int) -> str:
     return render.when(timestamp_ms, now_ms)
 
 
-def _bin_path() -> str:
+def bin_path() -> str:
     path = os.path.abspath(sys.argv[0])
     home = os.path.expanduser("~")
     return "~" + path[len(home) :] if path.startswith(home) else path
 
 
 def cmd_status(args) -> int:
-    entry = auth.resolve(args.url, timeout=secret_timeout())
-    client = JenkinsClient(entry.url, entry.username, entry.token, timeout=args.timeout)
+    entry = auth.resolve(getattr(args, "url", None), timeout=secret_timeout())
+    client = JenkinsClient(
+        entry.url,
+        entry.username,
+        entry.token,
+        timeout=getattr(args, "timeout", DEFAULT_TIMEOUT),
+    )
     try:
         data, server = api.root(client)
         reachable, auth_ok = True, True
@@ -79,7 +88,7 @@ def cmd_status(args) -> int:
         reachable, auth_ok = True, False
     t = (
         Toon()
-        .kv("bin", _bin_path())
+        .kv("bin", bin_path())
         .kv("description", DESCRIPTION)
         .kv("url", entry.url)
         .kv("reachable", reachable)
@@ -105,16 +114,17 @@ def cmd_setup(args) -> int:
 
 def cmd_job_list(args) -> int:
     client = client_for(args)
-    now = _now_ms()
+    now = now_ms()
     if args.name:
         ref = JobRef.from_string(args.name)
         branches = api.list_branches(client, ref, args.limit, now)
+        total = api.list_branches_count(client, ref)
         rows = [
             {
                 "name": b.name,
                 "build": b.number,
                 "status": b.status(now),
-                "when": _when(b.timestamp_ms, now),
+                "when": when(b.timestamp_ms, now),
             }
             for b in branches
         ]
@@ -123,7 +133,9 @@ def cmd_job_list(args) -> int:
         t = (
             Toon()
             .kv("job", ref.display)
-            .kv("total", len(rows))
+            .kv("total", total)  # the server-side count, not the page size
+            .kv("shown", len(rows))
+            .kv("truncated", len(rows) < total)
             .table("branches", ["name", "build", "status", "when"], rows)
         )
         t.help(
@@ -132,9 +144,12 @@ def cmd_job_list(args) -> int:
         ).emit()
         return EXIT_OK
     jobs = api.list_jobs(client, args.limit)
+    total = api.list_jobs_count(client)
     t = (
         Toon()
-        .kv("total", len(jobs))
+        .kv("total", total)  # the server-side count, not the page size
+        .kv("shown", len(jobs))
+        .kv("truncated", len(jobs) < total)
         .table(
             "jobs",
             ["name", "kind", "color"],
@@ -145,16 +160,16 @@ def cmd_job_list(args) -> int:
     return EXIT_OK
 
 
-def _build_ref(build: tuple[int, str, int] | None, now_ms: int) -> str:
+def build_ref(build: tuple[int, str, int] | None, now_ms: int) -> str:
     if not build:
         return "never"
     number, result, timestamp = build
-    return f"#{number} {result} {_when(timestamp, now_ms)}"
+    return f"#{number} {result} {when(timestamp, now_ms)}"
 
 
 def cmd_job_view(args) -> int:
     client, ref = client_for(args), JobRef.from_string(args.name)
-    now = _now_ms()
+    now = now_ms()
     detail = api.job_detail(client, ref)
     t = (
         Toon()
@@ -163,8 +178,8 @@ def cmd_job_view(args) -> int:
         .kv("kind", detail.kind)
         .kv("description", detail.description)
         .kv("health", detail.health)
-        .kv("last_success", _build_ref(detail.last_success, now))
-        .kv("last_failure", _build_ref(detail.last_failure, now))
+        .kv("last_success", build_ref(detail.last_success, now))
+        .kv("last_failure", build_ref(detail.last_failure, now))
     )
     if detail.params:
         t.obj("params", detail.params)
@@ -175,13 +190,13 @@ def cmd_job_view(args) -> int:
     return EXIT_OK
 
 
-def _spec_args(args) -> tuple[JenkinsClient, JobRef]:
+def spec_args(args) -> tuple[JenkinsClient, JobRef]:
     return client_for(args), JobRef.from_string(args.job)
 
 
 def cmd_build_view(args) -> int:
-    client, ref = _spec_args(args)
-    now = _now_ms()
+    client, ref = spec_args(args)
+    now = now_ms()
     info = api.build_info(client, ref, args.build, now_ms=now)
     t = Toon().kv("job", ref.display).kv("build", info.number)
     if info.building:
@@ -190,7 +205,7 @@ def cmd_build_view(args) -> int:
         )
     else:
         t.kv("status", info.result or "no result")
-        t.kv("when", _when(info.timestamp_ms, now))
+        t.kv("when", when(info.timestamp_ms, now))
         t.kv("duration", api.format_ms(info.duration_ms or 0))
     if info.params:
         t.obj("params", info.params)
@@ -202,7 +217,12 @@ def cmd_build_view(args) -> int:
 
 
 def cmd_build_console(args) -> int:
-    client, ref = _spec_args(args)
+    client, ref = spec_args(args)
+    if args.tail < 1:
+        raise AxiError(
+            f"invalid --tail {args.tail}",
+            "Tail is the number of trailing lines, minimum 1; use --full for everything",
+        )
     text = api.console_text(client, ref, args.build)
     lines = text.splitlines()
     if len(lines) > args.tail and not args.full:
@@ -214,11 +234,11 @@ def cmd_build_console(args) -> int:
 
 
 def cmd_build_watch(args) -> int:
-    client, ref = _spec_args(args)
-    info = api.build_info(client, ref, args.build, now_ms=_now_ms())
+    client, ref = spec_args(args)
+    info = api.build_info(client, ref, args.build, now_ms=now_ms())
     deadline = time.monotonic() + args.max
     while info.building:
-        elapsed = info.elapsed_ms(_now_ms())
+        elapsed = info.elapsed_ms(now_ms())
         print(
             f"t+{api.format_ms(elapsed)}: RUNNING {api.progress(elapsed, info.estimated_ms)}",
             flush=True,
@@ -230,10 +250,10 @@ def cmd_build_watch(args) -> int:
                 f"Or poll: `jenkins-axi build view {ref.display} {info.number}`",
             )
         time.sleep(args.interval)
-        info = api.build_info(client, ref, str(info.number), now_ms=_now_ms())
+        info = api.build_info(client, ref, str(info.number), now_ms=now_ms())
     Toon().kv("job", ref.display).kv("build", info.number).kv(
         "status", info.result or "no result"
-    ).kv("when", _when(info.timestamp_ms, _now_ms())).kv(
+    ).kv("when", when(info.timestamp_ms, now_ms())).kv(
         "duration", api.format_ms(info.duration_ms or 0)
     ).help(
         f"jenkins-axi build console {ref.display} {info.number}",
@@ -242,13 +262,13 @@ def cmd_build_watch(args) -> int:
     return EXIT_OK
 
 
-def _param_dict(raw_params: list[str]) -> dict[str, str]:
+def param_dict(raw_params: list[str]) -> dict[str, str]:
     params: dict[str, str] = {}
     for raw in raw_params:
         if "=" not in raw:
             raise AxiError(
                 f"invalid --param {raw!r}",
-                "Params are k=v (repeatable), e.g. --param deployment-id testec001",
+                "Params are k=v (repeatable), e.g. --param deployment-id=testec001",
             )
         key, value = raw.split("=", 1)
         params[key] = value
@@ -256,8 +276,8 @@ def _param_dict(raw_params: list[str]) -> dict[str, str]:
 
 
 def cmd_build_start(args) -> int:
-    client, ref = _spec_args(args)
-    result = api.start_build(client, ref, _param_dict(args.param or []))
+    client, ref = spec_args(args)
+    result = api.start_build(client, ref, param_dict(args.param or []))
     t = Toon().kv("job", ref.display).kv("action", "start")
     if result.queue_id:
         t.kv("queue", result.queue_id)
@@ -267,7 +287,7 @@ def cmd_build_start(args) -> int:
 
 
 def cmd_build_restart(args) -> int:
-    client, ref = _spec_args(args)
+    client, ref = spec_args(args)
     result = api.restart_build(client, ref, args.build)
     t = (
         Toon()
@@ -283,7 +303,7 @@ def cmd_build_restart(args) -> int:
 
 
 def cmd_build_stop(args) -> int:
-    client, ref = _spec_args(args)
+    client, ref = spec_args(args)
     result = api.stop_build(client, ref, args.build)
     t = (
         Toon()
@@ -298,9 +318,12 @@ def cmd_build_stop(args) -> int:
 
 def cmd_queue_list(args) -> int:
     client = client_for(args)
-    now = _now_ms()
+    now = now_ms()
     items = api.queue_items(client, args.limit)
-    Toon().kv("total", len(items)).table(
+    total = api.queue_total(client)
+    Toon().kv("total", total).kv("shown", len(items)).kv(
+        "truncated", len(items) < total
+    ).table(
         "items",
         ["why", "job", "queued_for"],
         [
@@ -313,14 +336,22 @@ def cmd_queue_list(args) -> int:
             }
             for item in items
         ],
-    ).help("jenkins-axi job list").emit()
+    ).help(
+        "jenkins-axi job list"
+    ).emit()
     return EXIT_OK
 
 
 def build_parser() -> argparse.ArgumentParser:
+    # default=SUPPRESS on the leaf copy: argparse copies the subparser
+    # namespace OVER the root's, so a leaf default (None / 15.0) would
+    # CLOBBER a root-parsed `--url http://x job list` (fresh-eyes #5). With
+    # SUPPRESS the attribute is only set when the flag is actually passed.
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--url", help=argparse.SUPPRESS)
-    common.add_argument("--timeout", type=float, default=15.0, help=argparse.SUPPRESS)
+    common.add_argument("--url", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    common.add_argument(
+        "--timeout", type=float, default=argparse.SUPPRESS, help=argparse.SUPPRESS
+    )
 
     parser = argparse.ArgumentParser(
         prog="jenkins-axi",
@@ -329,7 +360,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--url", help="select a stored server by url (default: the only entry)"
     )
-    parser.add_argument("--timeout", type=float, default=15.0, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--timeout", type=float, default=DEFAULT_TIMEOUT, help=argparse.SUPPRESS
+    )
     sub = parser.add_subparsers(dest="cmd")
 
     p_setup = sub.add_parser(
@@ -338,7 +371,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_setup.add_argument("--url", required=True)
     p_setup.add_argument("--username", required=True)
-    p_setup.add_argument("--timeout", type=float, default=15.0, help=argparse.SUPPRESS)
+    p_setup.add_argument(
+        "--timeout", type=float, default=argparse.SUPPRESS, help=argparse.SUPPRESS
+    )
 
     p_auth = sub.add_parser("auth", help="reachable? secret found? auth ok?")
     p_auth.add_subparsers(dest="sub").add_parser(
@@ -451,6 +486,13 @@ def main(argv: list[str] | None = None) -> int:
         return dispatch(args)
     except AxiError as e:
         fail(e.message, *e.hints)
+    except KeyboardInterrupt:
+        fail("interrupted")
+    except Exception as e:  # noqa: BLE001
+        # The one boundary where a broad catch is right: a traceback on
+        # stderr is invisible to an agent reading stdout, so even an
+        # unexpected error must land on stdout in the same shape.
+        fail(f"internal: {type(e).__name__}: {e}")
 
 
 if __name__ == "__main__":

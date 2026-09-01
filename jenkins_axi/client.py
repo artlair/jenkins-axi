@@ -11,8 +11,8 @@ process are:
   stop                 POST /job/<job>/<n>/stop
   replay               POST /job/<job>/<n>/replay
 
-Anything else — config.xml writes, doDelete, createItem, plugin/credential
-administration, the script console — is excluded by construction, not by
+Anything else, config.xml writes, doDelete, createItem, plugin/credential
+administration, the script console, is excluded by construction, not by
 policy. An eyeball on the four regexes below is an eyeball on the entire
 write surface.
 
@@ -80,21 +80,21 @@ class JobRef:
 
 class PostEndpoint(StrEnum):
     """The four POSTs jenkins-axi can ever issue. This enum plus the anchored
-    regexes in _PATH_PATTERNS are the entire write surface."""
+    regexes in PATH_PATTERNS are the entire write surface."""
 
     BUILD = "build"
     BUILD_WITH_PARAMS = "buildWithParameters"
     STOP = "stop"
-    REPLAY = "replay"
+    REPLAY = "replay"  # POSTed at /<n>/replay/rebuild (see post)
 
 
-_PATH_PATTERNS: dict[PostEndpoint, re.Pattern[str]] = {
+PATH_PATTERNS: dict[PostEndpoint, re.Pattern[str]] = {
     PostEndpoint.BUILD: re.compile(r"^/job/[^/]+(/job/[^/]+)?/build$"),
     PostEndpoint.BUILD_WITH_PARAMS: re.compile(
         r"^/job/[^/]+(/job/[^/]+)?/buildWithParameters$"
     ),
     PostEndpoint.STOP: re.compile(r"^/job/[^/]+(/job/[^/]+)?/[^/]+/stop$"),
-    PostEndpoint.REPLAY: re.compile(r"^/job/[^/]+(/job/[^/]+)?/[^/]+/replay$"),
+    PostEndpoint.REPLAY: re.compile(r"^/job/[^/]+(/job/[^/]+)?/[^/]+/replay/rebuild$"),
 }
 
 
@@ -158,11 +158,11 @@ class JenkinsClient:
             if e.code == 404:
                 raise NotFound(f"HTTP 404 for {request.get_full_url()}") from e
             raise AxiError(
-                f"HTTP {e.code} from Jenkins for {request.get_full_url()}: {_first_line(body)[:400]}",
+                f"HTTP {e.code} from Jenkins for {request.get_full_url()}: {first_line(body)[:400]}",
             ) from e
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             raise Unreachable(
-                f"server unreachable: {_first_line(str(e))[:400]}",
+                f"server unreachable: {first_line(str(e))[:400]}",
                 "Check network/VPN reachability of the Jenkins host",
                 "Run `jenkins-axi --url <url>` to try a different stored server",
             ) from e
@@ -175,15 +175,21 @@ class JenkinsClient:
         params: dict[str, str] | None = None,
     ) -> Response:
         """One of the four whitelisted POSTs. The path is built here and then
-        checked against the endpoint's anchored pattern — the whitelist holds
-        even against a caller that builds paths itself."""
+        checked against the endpoint's anchored pattern (the whitelist holds
+        even against a caller that builds paths itself)."""
         if endpoint in (PostEndpoint.BUILD, PostEndpoint.BUILD_WITH_PARAMS):
             path = ref.url_path("/" + endpoint.value)
+        elif endpoint is PostEndpoint.REPLAY:
+            # workflow-cps ReplayAction: POST /replay renders the replay FORM
+            # (no doIndex -> no trigger, no queue). The real trigger is
+            # doRebuild at /replay/rebuild: replays the same script and
+            # params. Verified against workflow-cps ReplayAction.
+            path = ref.url_path(f"/{n}/replay/rebuild")
         else:
             if n is None:
                 raise AxiError(f"{endpoint.value} needs a build number")
             path = ref.url_path(f"/{n}/{endpoint.value}")
-        if not _PATH_PATTERNS[endpoint].match(path):
+        if not PATH_PATTERNS[endpoint].match(path):
             # Unreachable by construction; the check exists so a future edit
             # that breaks the whitelist fails loudly, not silently.
             raise ProgrammingError(
@@ -204,8 +210,11 @@ class JenkinsClient:
 
     def crumb(self) -> tuple[str, str] | None:
         """The CSRF crumb (field name, crumb value), fetched once per process
-        and cached. Modern Jenkins exempts API-token auth, so a failed crumb
-        fetch never blocks the POST — the negotiation just yields nothing."""
+        and cached. Honest about what it buys: crumbs are session-bound and
+        this client keeps no cookie jar, but Jenkins skips the crumb check
+        for API-token-authenticated requests entirely (ApiCrumbExclusion), so
+        the negotiation is belt-and-braces: carried when the server answers
+        crumbIssuer, never allowed to block the POST when it does not."""
         if "crumb" not in self.crumb_cache:
             try:
                 response = self.get_json("/crumbIssuer/api/json")
@@ -227,5 +236,5 @@ class JenkinsClient:
         return self.get("/api/json").headers.get("X-Jenkins")
 
 
-def _first_line(text: str) -> str:
+def first_line(text: str) -> str:
     return " ".join(text.split()) if text else ""

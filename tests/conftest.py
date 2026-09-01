@@ -1,8 +1,8 @@
 """End-to-end test harness.
 
-These tests drive the real `jenkins-axi` CLI as a subprocess — real config
+These tests drive the real `jenkins-axi` CLI as a subprocess, real config
 resolution, real HTTP round-trips, real argparse dispatch, real subprocess
-secret-tool — with the whole external world faked so we can observe exactly
+secret-tool, with the whole external world faked so we can observe exactly
 what a user would experience:
 
   * a fake Jenkins HTTP server standing in for the real server, which records
@@ -60,14 +60,20 @@ class Recorder:
     )
 
 
-def _make_handler(rec: Recorder):
+def make_handler(rec: Recorder):
     class Handler(BaseHTTPRequestHandler):
         def _bare_path(self) -> str:
             return self.path.split("?")[0]
 
         def _record(self, method: str, body: bytes | None = None):
             rec.requests.append(
-                (method, self._bare_path(), self.headers.get("Authorization"), body)
+                (
+                    method,
+                    self._bare_path(),
+                    self.headers.get("Authorization"),
+                    self.headers.get("Jenkins-Crumb"),
+                    body,
+                )
             )
             if (
                 rec.basic_auth is not None
@@ -111,7 +117,9 @@ def _make_handler(rec: Recorder):
             if status:
                 self._send(status, err)
                 return
-            if self._bare_path().endswith("/replay"):
+            # Real endpoint: workflow-cps doRebuild (the /replay index is
+            # the replay FORM, which a POST merely renders).
+            if self._bare_path().endswith("/replay/rebuild"):
                 self._send(rec.replay_status, "{}")
                 return
             self._send(rec.post_status, "{}")
@@ -156,7 +164,7 @@ class FakeJenkins:
     def posts(self) -> list[tuple[str, bytes | None]]:
         return [
             (path, body)
-            for (method, path, _auth, body) in self.requests
+            for (method, path, _auth, _crumb, body) in self.requests
             if method == "POST"
         ]
 
@@ -164,7 +172,7 @@ class FakeJenkins:
 @pytest.fixture
 def fake_jenkins():
     rec = Recorder()
-    server = HTTPServer(("127.0.0.1", 0), _make_handler(rec))
+    server = HTTPServer(("127.0.0.1", 0), make_handler(rec))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -179,7 +187,7 @@ def fake_jenkins():
 # EVERY attribute.<key> line on STDERR (g_printerr in libsecret's
 # tool/secret-tool.c). Reads stdin ONLY for `store` (the secret; searching
 # must never block on an inherited stdin).
-_SECRET_TOOL_STUB = """\
+SECRET_TOOL_STUB = """\
 #!/usr/bin/env python3
 import os, sys, time
 argv = sys.argv[1:]
@@ -193,29 +201,39 @@ if sleep:
 for line in os.environ.get("JENKINS_AXI_TEST_SEARCH_BLOCK", "").splitlines():
     stream = sys.stderr if line.startswith("attribute.") else sys.stdout
     stream.write(line + "\\n")
+    stream.flush()
 """
 
 
-def _write_stub(bindir: Path, name: str, body: str) -> None:
+def write_stub(bindir: Path, name: str, body: str) -> None:
     p = bindir / name
     p.write_text(body)
     p.chmod(0o755)
 
 
 def search_block(url: str, username: str = "alec", secret: str = "testtoken123") -> str:
-    """One `secret-tool search --all` item, exactly like the real merged
-    output (attribute lines land on stderr, the rest on stdout)."""
+    """One `secret-tool search --all` item in the REAL libsecret layout
+    (verified live + against tool/secret-tool.c 0.21.7): a bracketed header
+    line starts each item, then label/secret/created/modified/schema on
+    stdout and EVERY attribute line on stderr, and there are NO blank lines
+    between items. Multi-item blocks are simply concatenated. The empty
+    attribute lines KeePassXC always emits (UserName, URL) are included so
+    empty-match shadowing is exercised, not assumed away."""
     return (
-        "[showing all matching items]\n"
-        "/fake/path\n"
+        f"[b017136cf4324982b3cb5dbe58173868]\n"
         "label = Jenkins (jenkins-axi)\n"
         f"secret = {secret}\n"
-        "created = 123.0\n"
-        "modified = 123.0\n"
+        "created = 2026-09-01 10:00:00\n"
+        "modified = 2026-09-01 10:00:00\n"
         "schema = org.freedesktop.Secret.Generic\n"
         "attribute.service = jenkins-axi\n"
         f"attribute.url = {url}\n"
-        f"attribute.username = {username}"
+        "attribute.URL = \n"
+        "attribute.UserName = \n"
+        f"attribute.username = {username}\n"
+        f"attribute.Uuid = b017136cf4324982b3cb5dbe58173868\n"
+        # Every g_print line ends with a newline, INCLUDING the last item's,
+        # so concatenating items keeps each header on its own line.
     )
 
 
@@ -266,7 +284,7 @@ def harness(tmp_path, fake_jenkins):
         pytest.skip("`jenkins-axi` console script not installed; run under `uv run`")
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    _write_stub(bindir, "secret-tool", _SECRET_TOOL_STUB)
+    write_stub(bindir, "secret-tool", SECRET_TOOL_STUB)
     return Harness(
         root=tmp_path,
         bindir=bindir,

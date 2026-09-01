@@ -74,13 +74,21 @@ def normalize_url(url: str) -> str:
 
 
 def secret_tool(*args: str, secret_input: str | None = None, timeout: float) -> str:
-    """Run secret-tool, merging both streams (attributes land on stderr),
-    under the hard fail-closed timeout."""
+    """Run secret-tool under the hard fail-closed timeout.
+
+    Both streams are merged INTO ONE PIPE (stderr=STDOUT), not concatenated
+    after separate capture: attributes land on stderr and per-item lines on
+    stdout, and only a single shared pipe preserves their write order (glib
+    flushes after every g_print/g_printerr, verified against libsecret 0.21.7
+    tool/secret-tool.c and live KeePassXC output). Merging is parse-safe:
+    stray stderr diagnostics never equal a bare secret/attribute key.
+    """
     try:
         proc = subprocess.run(
             ["secret-tool", *args],
             input=secret_input,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
             check=False,
             timeout=timeout,
@@ -95,35 +103,48 @@ def secret_tool(*args: str, secret_input: str | None = None, timeout: float) -> 
             f"{int(timeout)}s (vault locked, waiting on the unlock prompt?)",
             "Unlock the vault and re-run",
         ) from e
-    # Merged streams are parse-safe: stray stderr diagnostics never equal a
-    # bare secret/attribute key (verified in the confluence-axi wrapper).
-    return proc.stdout + proc.stderr
+    if proc.returncode != 0:
+        raise AxiError(
+            f"secret-tool failed (rc {proc.returncode}): {first_line(proc.stdout)[:400]}",
+            "Check the Secret Service provider (session bus, unlocked vault)",
+        )
+    return proc.stdout
 
 
-def _parse_search(raw: str) -> list[dict[str, str]]:
+def parse_search(raw: str) -> list[dict[str, str]]:
     """Parse merged `secret-tool search --all` output into one dict per item.
 
-    Items are separated by blank lines. Per key the first NON-EMPTY value
-    wins: empty always-emitted-but-empty lines (KeePassXC's attribute.UserName)
-    must not shadow a later non-empty one (attribute.username).
+    Real libsecret layout (verified live + against tool/secret-tool.c 0.21.7):
+    each item STARTS with a bracketed header line ([<uuid>]), then label /
+    secret / created / modified / schema on stdout and every attribute.<k>
+    line on stderr. There are NO blank lines between items (with one stored
+    server the blank-line split collapses nothing; with two it collapses
+    them into one block and silently keeps the first item's credential).
+    Per key the first NON-EMPTY value wins: empty always-emitted-but-empty
+    lines (KeePassXC's attribute.UserName/URL) must not shadow a later
+    non-empty one (attribute.username).
     """
     items: list[dict[str, str]] = []
-    for block in raw.split("\n\n"):
-        pairs: dict[str, str] = {}
-        for line in block.splitlines():
-            i = line.find(" = ")
-            if i <= 0:
-                continue
-            key = line[:i].strip()
-            value = line[i + 3 :]
-            if value and key not in pairs:
-                pairs[key] = value
-        if pairs:
-            items.append(pairs)
+    pairs: dict[str, str] = {}
+    for line in raw.splitlines():
+        if line.startswith("[") and line.endswith("]"):
+            if pairs:
+                items.append(pairs)
+            pairs = {}
+            continue
+        i = line.find(" = ")
+        if i <= 0:
+            continue
+        key = line[:i].strip()
+        value = line[i + 3 :]
+        if value and key not in pairs:
+            pairs[key] = value
+    if pairs:
+        items.append(pairs)
     return items
 
 
-def _attribute(item: dict[str, str], name: str) -> str | None:
+def attribute(item: dict[str, str], name: str) -> str | None:
     """Read attribute.<name>, case-insensitively on the attribute part: we
     store lowercase via secret-tool store, while KeePassXC exposes the entry
     Username field as attribute.UserName."""
@@ -143,7 +164,7 @@ def resolve(
     `--url <one of them>`); a url_filter narrows the selection first.
     """
     raw = secret_tool("search", "--all", "service", ENTRY_SERVICE, timeout=timeout)
-    items = _parse_search(raw)
+    items = parse_search(raw)
     if not items:
         raise AxiError(
             "no Secret Service entry found for Jenkins",
@@ -153,12 +174,12 @@ def resolve(
     entries = [
         item
         for item in items
-        if url_filter is None or _attribute(item, "url") == normalize_url(url_filter)
+        if url_filter is None or attribute(item, "url") == normalize_url(url_filter)
     ]
     if len(entries) == 1:
         item = entries[0]
-        url = _attribute(item, "url")
-        username = _attribute(item, "username")
+        url = attribute(item, "url")
+        username = attribute(item, "username")
         token = item.get("secret")
         missing = [
             name
@@ -172,14 +193,14 @@ def resolve(
             )
         return Entry.from_pairs(url, username, token)
     if not entries:
-        known = sorted({u for item in items if (u := _attribute(item, "url"))})
+        known = sorted({u for item in items if (u := attribute(item, "url"))})
         raise AxiError(
             f"no Secret Service entry with url {normalize_url(url_filter)!r} "
             f"(found: {', '.join(repr(u) for u in known)})",
             "Run `jenkins-axi setup --url <url> --username <user>` to add it, "
             "or `jenkins-axi --url <one of the found urls>`",
         )
-    urls = sorted({u for item in entries if (u := _attribute(item, "url"))})
+    urls = sorted({u for item in entries if (u := attribute(item, "url"))})
     raise AxiError(
         f"{len(entries)} Secret Service entries found (urls: {', '.join(repr(u) for u in urls)})",
         "Pass --url <one of the found urls> to select one",
@@ -199,6 +220,7 @@ def setup(url: str, username: str, timeout: float = DEFAULT_SECRET_TIMEOUT) -> E
     )
     if not token.strip():
         raise AxiError("empty API token: nothing stored", "Re-run and paste the token")
+    token = token.strip()  # pasted tokens arrive with trailing spaces/CRLF
     secret_tool(
         "store",
         "--label=Jenkins (jenkins-axi)",
@@ -212,3 +234,7 @@ def setup(url: str, username: str, timeout: float = DEFAULT_SECRET_TIMEOUT) -> E
         timeout=timeout,
     )
     return Entry(url, username, token)
+
+
+def first_line(text: str) -> str:
+    return " ".join(text.split()) if text else ""

@@ -1,4 +1,4 @@
-"""TOON encoding (https://toonformat.dev/) — the AXI output format (§1).
+"""TOON encoding (https://toonformat.dev/), the AXI output format (§1).
 
 Encoder prelude copied from the working fleet reference
 (my-salt/formulas/herdr/files/herdr-axi.py), which cites AXI §7.2 quoting and
@@ -95,7 +95,7 @@ class Toon:
         self, key: str, fields: list[str], rows: list[dict], indent: int = 0
     ) -> Toon:
         """An array of objects in tabular form (§9.3), or `key: []` when empty
-        — AXI §5 wants the zero stated, not implied by silence."""
+        , AXI §5 wants the zero stated, not implied by silence."""
         pad = "  " * indent
         if not rows:
             self.lines.append("%s%s: []" % (pad, field(key)))

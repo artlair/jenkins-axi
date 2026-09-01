@@ -10,9 +10,9 @@ with the fix inline.
 
 The REST client exposes `get()` plus a `post()` whose endpoints are a fixed
 whitelist in `client.py` (build, buildWithParameters, stop, replay). That is
-the entire write surface. Config changes and destructive actions — create or
+the entire write surface. Config changes and destructive actions, create or
 edit or delete jobs, config.xml, plugin/credential/node administration, the
-script console — are excluded by construction, not by policy. The whitelist is
+script console, are excluded by construction, not by policy. The whitelist is
 the reviewable boundary; an eyeball on four regexes covers it.
 
 ## Install
@@ -56,7 +56,7 @@ build view      one build's status; while building: elapsed vs estimated
 build console   a build's console output (--tail N default, --full)
 build watch     poll a build until it finishes (read-only polling)
 build start     trigger a build (--param k=v, repeatable)
-build restart   re-run an existing build (replay, or re-trigger with original params)
+build restart   re-run: same script+params via /replay/rebuild, or re-trigger with the build's original parameters
 build stop      stop an in-progress build (honest no-op if completed)
 queue list      the build queue, with the "why" per item
 ```

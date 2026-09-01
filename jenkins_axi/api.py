@@ -3,7 +3,7 @@ taking a JenkinsClient. cli.py is thin wiring over these; tests target the
 operations through their seams, not the argparse entrypoint.
 
 Build addressing (`spec`): `last` resolves to Jenkins' own /lastBuild path,
-an integer to /<n>/. Every operation answers the build that lastBuild names —
+an integer to /<n>/. Every operation answers the build that lastBuild names,
 for a pipeline that is the most recent build regardless of completion, so
 lastBuild.building is the honest "is something running" signal.
 
@@ -116,15 +116,19 @@ class BuildInfo:
     duration_ms: int | None
     estimated_ms: int | None
     params: dict[str, str]  # original parameters (name -> value), for restart
+    param_count: int  # total parameter defs; null-masked (passwords) included
 
     @classmethod
     def from_json(cls, data: dict) -> BuildInfo:
-        params = {
-            p["name"]: str(p["value"])
+        all_params = [
+            p
             for action in data.get("actions") or []
             for p in (action.get("parameters") or [])
-            if p.get("value") is not None
+        ]
+        params = {
+            p["name"]: str(p["value"]) for p in all_params if p.get("value") is not None
         }
+        param_count = len(all_params)  # null-masked (passwords) included
         return cls(
             number=data["number"],
             building=bool(data.get("building")),
@@ -133,6 +137,7 @@ class BuildInfo:
             duration_ms=data.get("duration"),
             estimated_ms=data.get("estimatedDuration"),
             params=params,
+            param_count=param_count,
         )
 
     def elapsed_ms(self, now_ms: int) -> int:
@@ -180,7 +185,7 @@ class RestartResult:
     original_number: int
     queue_id: int | None
     item: QueueItem | None
-    path: str  # "replayed" | "re-triggered with original params" | "re-triggered"
+    path: str  # "rebuilt (POSTed /replay/rebuild)" | "re-triggered..." modes
 
 
 @dataclass(frozen=True)
@@ -190,6 +195,9 @@ class StopResult:
     stopped: bool
     result: str | None
     detail: str
+
+
+NESTED_KINDS = {"multibranch", "folder"}
 
 
 def kind_of(underclass: str) -> str:
@@ -226,6 +234,22 @@ def list_jobs(client: JenkinsClient, limit: int) -> list[JobSummary]:
     )
     data = as_dict(response)
     return [JobSummary.from_json(j) for j in data.get("jobs", [])]
+
+
+def list_jobs_count(client: JenkinsClient) -> int:
+    """The server-side count, unranged names-only: the ranged page's len is
+    the page size, and printing it as `total` lies to the agent (fresh-eyes
+    #6: a 120-job server would answer total: 50, read as "there are 50")."""
+    return len(as_dict(client.get_json("/api/json", tree="jobs[name]")).get("jobs", []))
+
+
+def list_branches_count(client: JenkinsClient, ref: JobRef) -> int:
+    """Server-side branch count for a multibranch project (see list_jobs_count)."""
+    return len(
+        as_dict(client.get_json(ref.url_path("/api/json"), tree="jobs[name]")).get(
+            "jobs", []
+        )
+    )
 
 
 def list_branches(
@@ -314,13 +338,24 @@ def start_build(
     if params:
         response = client.post(PostEndpoint.BUILD_WITH_PARAMS, ref, params=params)
     else:
+        # The probe needs /api/json: the bare job path answers text/html on a
+        # real server, which as_dict silently flattens to {} and every job
+        # would read non-parameterized (fresh-eyes #4).
         definitions = client.get_json(
-            ref.url_path(), tree="property[parameterDefinitions[name]]"
+            ref.url_path("/api/json"), tree="property[parameterDefinitions[name]]"
         )
-        if as_dict(definitions).get("property"):
+        data = as_dict(definitions)
+        if kind_of(data.get("_class", "")) in NESTED_KINDS:
+            raise AxiError(
+                f"{ref.display} is a {kind_of(data.get("_class", ""))} project: "
+                "POSTing /build there re-indexes branches, it does not start a build",
+                f"Run `jenkins-axi job list {ref.display}` to list its branches",
+                f"Address a build target as {ref.display}/<branch>",
+            )
+        if data.get("property"):
             required = [
                 definition["name"]
-                for prop in as_dict(definitions)["property"]
+                for prop in data["property"]
                 for definition in prop.get("parameterDefinitions", [])
             ]
             raise AxiError(
@@ -348,12 +383,15 @@ def restart_build(client: JenkinsClient, ref: JobRef, spec: str) -> RestartResul
     info = build_info(client, ref, spec)
     try:
         response = client.post(PostEndpoint.REPLAY, ref, n=info.number)
-        path = "replayed"
-    except NotFound:
-        # Non-workflow builds have no replay endpoint (a definite 404/405:
-        # definitely not triggered). Only a definite miss falls back — an
-        # ambiguous failure (500, timeout) may already have queued a build,
-        # and re-triggering that would double-fire. Surface it instead.
+        # workflow-cps doRebuild: replays the same script and params, answers
+        # a 302 back to the build page. NOT the form-rendering /replay index,
+        # whose 200 means "rendered the form" and queued nothing.
+        path = "rebuilt (POSTed /replay/rebuild)"
+    except AxiError, NotFound:
+        # Only a definite miss falls back (404 = no doRebuild here, so
+        # definitely not triggered; a 405 raises and surfaces). An ambiguous
+        # failure (500, timeout) may already have queued a build, and
+        # re-triggering that would double-fire. Surface it instead.
         if info.params:
             response = client.post(
                 PostEndpoint.BUILD_WITH_PARAMS, ref, params=info.params
@@ -364,8 +402,18 @@ def restart_build(client: JenkinsClient, ref: JobRef, spec: str) -> RestartResul
             path = "re-triggered"
     queue_id = queue_id_from(response)
     item = queue_item(client, queue_id) if queue_id else None
+    # Password/credential parameters are null-masked by the API and dropped
+    # from `params`: say so rather than implying a faithful re-run.
+    detail = path
+    if path != "rebuilt (POSTed /replay/rebuild)" and info.param_count > len(
+        info.params
+    ):
+        masked = info.param_count - len(info.params)
+        detail += (
+            f" ({masked} of {info.param_count} params null-masked, defaults applied)"
+        )
     return RestartResult(
-        ref=ref, original_number=info.number, queue_id=queue_id, item=item, path=path
+        ref=ref, original_number=info.number, queue_id=queue_id, item=item, path=detail
     )
 
 
@@ -413,14 +461,25 @@ def missing_job(ref: JobRef) -> AxiError:
 
 def missing_build(client: JenkinsClient, ref: JobRef, spec: str) -> AxiError:
     """An honest 404 for a build request: ask the job API itself so "job
-    exists, no builds yet" never reads as "no such job" (or the reverse)."""
+    exists, no builds yet" never reads as "no such job" (or the reverse) -
+    and a multibranch/folder target gets the drill-down fix, because "has
+    no builds yet" would hint `build start <project>`, which re-indexes
+    branches."""
     try:
-        client.get_json(ref.url_path("/api/json"), tree="lastBuild[number]")
+        probe = client.get_json(
+            ref.url_path("/api/json"), tree="lastBuild[number],_class"
+        )
     except NotFound:
         return AxiError(
             f"no such job or folder: {ref.display}",
             "Run `jenkins-axi job list` to see jobs",
             "Multibranch branches are addressed as project/branch",
+        )
+    if kind_of(as_dict(probe).get("_class", "")) in NESTED_KINDS:
+        return AxiError(
+            f"{ref.display} is a {kind_of(as_dict(probe).get("_class", ""))} project: "
+            "no project-level builds; address project/branch",
+            f"Run `jenkins-axi job list {ref.display}` to list its branches",
         )
     if spec == SPEC_LAST:
         return AxiError(

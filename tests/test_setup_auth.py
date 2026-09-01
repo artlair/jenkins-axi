@@ -45,7 +45,7 @@ def test_basic_auth_uses_stored_credential(harness, fake_jenkins):
     fake_jenkins.set_basic_auth("alec", "testtoken123")
     done = harness.run("job", "list")
     assert done.returncode == 0
-    method, _path, auth, _body = fake_jenkins.requests[0]
+    method, _path, auth, _crumb, _body = fake_jenkins.requests[0]
     assert method == "GET"
     assert auth == fake_jenkins.rec.basic_auth
 
@@ -59,24 +59,23 @@ def test_missing_entry_fails_with_remedy(harness):
 
 def test_multi_entry_requires_url(harness, fake_jenkins):
     other = search_block("http://other.example.net:8080", secret="other")
+    # Real libsecret layout: items are simply concatenated, no blank lines.
+    block = search_block(fake_jenkins.url) + other
     done = harness.run(
-        "job",
-        "list",
-        extra_env={
-            "JENKINS_AXI_TEST_SEARCH_BLOCK": search_block(fake_jenkins.url)
-            + "\n\n"
-            + other
-        },
+        "job", "list", extra_env={"JENKINS_AXI_TEST_SEARCH_BLOCK": block}
     )
     assert done.returncode == 1
     assert "2 Secret Service entries found" in done.stdout
     assert "--url" in done.stdout
 
 
-def test_multi_entry_url_selects(harness, fake_jenkins):
-    other = search_block("http://other.example.net:8080", secret="other")
-    block = search_block(fake_jenkins.url) + "\n\n" + other
+def test_multi_entry_url_selects_the_right_credential(harness, fake_jenkins):
+    import base64
+
+    other = search_block("http://other.example.net:8080", secret="other-token")
+    block = search_block(fake_jenkins.url, secret="token-a") + other
     fake_jenkins.set_route_json("/api/json", {"jobs": []})
+    fake_jenkins.set_basic_auth("alec", "token-a")
     done = harness.run(
         "job",
         "list",
@@ -85,6 +84,10 @@ def test_multi_entry_url_selects(harness, fake_jenkins):
         extra_env={"JENKINS_AXI_TEST_SEARCH_BLOCK": block},
     )
     assert done.returncode == 0
+    # Pin WHICH credential rode the request: url A's secret, not a
+    # cross-wired mix from a collapsed block (fresh-eyes #2).
+    expected = "Basic " + base64.b64encode(b"alec:token-a").decode()
+    assert any(auth == expected for (_m, _p, auth, _c, _b) in fake_jenkins.requests)
 
 
 def test_url_select_fails_with_found_urls(harness, fake_jenkins):
@@ -128,3 +131,25 @@ def test_missing_username_attribute_is_reported(harness, fake_jenkins):
     )
     assert done.returncode == 1
     assert "missing: username" in done.stdout
+
+
+def test_root_form_url_flag_reaches_the_client(harness, fake_jenkins):
+    """The documented form is `jenkins-axi --url <url> <cmd>` (it is the one
+    root --help shows). The leaf defaults must not clobber it (fresh-eyes
+    #5): argparse copies the subparser namespace OVER the root's."""
+    other = search_block("http://other.example.net:8080", secret="other-token")
+    block = search_block(fake_jenkins.url, secret="token-a") + other
+    fake_jenkins.set_route_json("/api/json", {"jobs": []})
+    fake_jenkins.set_basic_auth("alec", "token-a")
+    import base64
+
+    done = harness.run(
+        "--url",
+        fake_jenkins.url,
+        "job",
+        "list",
+        extra_env={"JENKINS_AXI_TEST_SEARCH_BLOCK": block},
+    )
+    assert done.returncode == 0
+    expected = "Basic " + base64.b64encode(b"alec:token-a").decode()
+    assert any(auth == expected for (_m, _p, auth, _c, _b) in fake_jenkins.requests)
