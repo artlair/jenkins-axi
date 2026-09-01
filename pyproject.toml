@@ -1,0 +1,38 @@
+[project]
+name = "jenkins-axi"
+version = "0.1.0"
+description = "Agent-ergonomic Jenkins CLI: monitor pipelines, start/restart/stop builds, answered in TOON."
+readme = "README.md"
+requires-python = ">=3.14"
+license = { text = "MIT" }
+authors = [{ name = "Alec Thomas" }]
+dependencies = []
+
+[project.scripts]
+jenkins-axi = "jenkins_axi.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6", "black>=24"]
+
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
+
+# Flat layout: the `jenkins_axi` package sits at the repo root, not under src/.
+[tool.uv.build-backend]
+module-root = ""
+
+[tool.black]
+target-version = ["py314"]
+
+[tool.ruff]
+target-version = "py314"
+
+[tool.ruff.lint.per-file-ignores]
+# The TOON encoder prelude is the verbatim-copied fleet reference
+# (my-salt/formulas/herdr/files/herdr-axi.py): keep it byte-close, suppress
+# the stylistic percent-format rules instead of rewriting solved quoting.
+"jenkins_axi/toon.py" = ["UP031"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
