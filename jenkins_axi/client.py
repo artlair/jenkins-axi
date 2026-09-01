@@ -9,7 +9,7 @@ process are:
   build                POST /job/<job>/build
   buildWithParameters  POST /job/<job>/buildWithParameters (form-encoded params)
   stop                 POST /job/<job>/<n>/stop
-  replay               POST /job/<job>/<n>/replay
+  replay/rebuild       POST /job/<job>/<n>/replay/rebuild
 
 Anything else, config.xml writes, doDelete, createItem, plugin/credential
 administration, the script console, is excluded by construction, not by
@@ -93,8 +93,11 @@ PATH_PATTERNS: dict[PostEndpoint, re.Pattern[str]] = {
     PostEndpoint.BUILD_WITH_PARAMS: re.compile(
         r"^/job/[^/]+(/job/[^/]+)?/buildWithParameters$"
     ),
-    PostEndpoint.STOP: re.compile(r"^/job/[^/]+(/job/[^/]+)?/[^/]+/stop$"),
-    PostEndpoint.REPLAY: re.compile(r"^/job/[^/]+(/job/[^/]+)?/[^/]+/replay/rebuild$"),
+    # Build-number segments are digits: a None/str(None) segment must NOT be
+    # able to sneak past `[^/]+` (round-2 review: /job/x/None/replay/rebuild
+    # matched `[^/]+` and never reached the ProgrammingError guard).
+    PostEndpoint.STOP: re.compile(r"^/job/[^/]+(/job/[^/]+)?/\d+/stop$"),
+    PostEndpoint.REPLAY: re.compile(r"^/job/[^/]+(/job/[^/]+)?/\d+/replay/rebuild$"),
 }
 
 

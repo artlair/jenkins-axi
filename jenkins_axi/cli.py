@@ -119,6 +119,10 @@ def cmd_job_list(args) -> int:
         ref = JobRef.from_string(args.name)
         branches = api.list_branches(client, ref, args.limit, now)
         total = api.list_branches_count(client, ref)
+        # The --running filter runs over the fetched page only: shown keeps
+        # meaning the PAGE (so truncated = page < total stays truthful) and
+        # matched says how many of those matched. Filtering FIRST (round-2
+        # review) made truncated: true fire on an untruncated list.
         rows = [
             {
                 "name": b.name,
@@ -128,16 +132,20 @@ def cmd_job_list(args) -> int:
             }
             for b in branches
         ]
+        matched = None
         if args.running:
             rows = [row for row in rows if str(row["status"]).startswith("RUNNING")]
+            matched = len(rows)
         t = (
             Toon()
             .kv("job", ref.display)
             .kv("total", total)  # the server-side count, not the page size
-            .kv("shown", len(rows))
-            .kv("truncated", len(rows) < total)
-            .table("branches", ["name", "build", "status", "when"], rows)
+            .kv("shown", len(branches))
+            .kv("truncated", len(branches) < total)
         )
+        if matched is not None:
+            t.kv("matched", matched)
+        t.table("branches", ["name", "build", "status", "when"], rows)
         t.help(
             f"jenkins-axi build watch {ref.display}/<branch> last",
             f"jenkins-axi job view {ref.display}",

@@ -33,6 +33,11 @@ def route_build(
     # itself when /lastBuild 404s, and "no such job" must not shadow "no
     # such build" here.
     fake_jenkins.set_route_json("/job/atlas/job/feature%2Fwip/api/json", {})
+    # The job page exists too (with the trailing slash urllib resolves for
+    # ../..): the real doRebuild 302-back is followed by urllib as a GET.
+    fake_jenkins.set_route(
+        "/job/atlas/job/feature%2Fwip/", "{}", content_type="application/json"
+    )
     fake_jenkins.set_route_json(
         "/job/atlas/job/feature%2Fwip/lastBuild/api/json", build
     )
@@ -229,10 +234,26 @@ def test_build_restart_replays_with_crumb(harness, fake_jenkins):
     assert posts[0][0] == "/job/atlas/job/feature%2Fwip/7/replay/rebuild"
     assert len(posts) == 1  # exactly ONE restart POST
     # doRebuild answers a 302 back to the build page: no queue id to report,
-    # so the output says what it did, not an invented queue line.
+    # so the output says what it did, not an invented queue line (this claim
+    # survived round 1 only because the fake answered 201 + queue Location;
+    # the fake now answers the real 302, so this asserts the honest shape).
     assert "path: rebuilt (POSTed /replay/rebuild)" in done.stdout
+    assert "queue:" not in done.stdout
     # The crumb premise, tested: the POST carries the negotiated crumb.
     assert any(crumb == "c0ffee" for (_m, _p, _a, crumb, _b) in fake_jenkins.requests)
+
+
+def test_build_restart_ambiguous_failure_surfaces_it(harness, fake_jenkins):
+    """A 500 on rebuild is ambiguous (the build may have queued): exactly one
+    POST, exit 1, no fallback."""
+    route_build(
+        fake_jenkins, building=False, timestamp_ms=0, estimated_ms=1, params={"a": "b"}
+    )
+    fake_jenkins.rec.replay_status = 500
+    done = harness.run("build", "restart", "atlas/feature/wip", "7")
+    assert done.returncode == 1
+    assert "HTTP 500" in done.stdout
+    assert len(fake_jenkins.posts()) == 1  # no blind fallback
 
 
 def test_build_restart_falls_back_to_original_params(harness, fake_jenkins):

@@ -51,7 +51,7 @@ class Recorder:
     basic_auth: str | None = None  # expected Authorization header; None = no auth check
     post_status: int = 201
     post_location: str | None = "http://127.0.0.1:1/queue/item/123/"
-    replay_status: int = 201
+    replay_status: int = 302
     crumb: dict | None = field(
         default_factory=lambda: {
             "crumb": "c0ffee",
@@ -120,7 +120,16 @@ def make_handler(rec: Recorder):
             # Real endpoint: workflow-cps doRebuild (the /replay index is
             # the replay FORM, which a POST merely renders).
             if self._bare_path().endswith("/replay/rebuild"):
-                self._send(rec.replay_status, "{}")
+                if rec.replay_status == 302:
+                    # Real doRebuild: queues the build, answers a 302 back to
+                    # the build page (NOT a 201 + queue Location; that is
+                    # buildWithParameters). urllib follows it as a GET of the
+                    # build page, which routes like any GET.
+                    self.send_response(302)
+                    self.send_header("Location", "../..")
+                    self.end_headers()
+                else:
+                    self._send(rec.replay_status, "{}")
                 return
             self._send(rec.post_status, "{}")
 

@@ -387,11 +387,12 @@ def restart_build(client: JenkinsClient, ref: JobRef, spec: str) -> RestartResul
         # a 302 back to the build page. NOT the form-rendering /replay index,
         # whose 200 means "rendered the form" and queued nothing.
         path = "rebuilt (POSTed /replay/rebuild)"
-    except AxiError, NotFound:
-        # Only a definite miss falls back (404 = no doRebuild here, so
-        # definitely not triggered; a 405 raises and surfaces). An ambiguous
-        # failure (500, timeout) may already have queued a build, and
-        # re-triggering that would double-fire. Surface it instead.
+    except NotFound:
+        # ONLY a definite miss falls back (404 = no doRebuild here, so
+        # definitely not triggered; a freestyle build has no ReplayAction).
+        # Unreachable/AuthFailed/5xx/409 must NOT: an ambiguous failure may
+        # already have queued a build, and re-triggering that would
+        # double-fire (round-2 repro: 500 -> two POSTs, success reported).
         if info.params:
             response = client.post(
                 PostEndpoint.BUILD_WITH_PARAMS, ref, params=info.params
