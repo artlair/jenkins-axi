@@ -4,6 +4,9 @@ honestly, with the crumb attached."""
 
 from __future__ import annotations
 
+import re
+import time
+
 
 def route_build(
     fake_jenkins,
@@ -37,8 +40,6 @@ def route_build(
 
 
 def test_build_view_running_reports_elapsed_vs_estimate(harness, fake_jenkins):
-    import time
-
     now_ms = int(time.time() * 1000)
     route_build(
         fake_jenkins, building=True, timestamp_ms=now_ms - 5_000, estimated_ms=10_000
@@ -46,9 +47,12 @@ def test_build_view_running_reports_elapsed_vs_estimate(harness, fake_jenkins):
     done = harness.run("build", "view", "atlas/feature/wip")
     assert done.returncode == 0
     assert "RUNNING" in done.stdout
-    assert "5s elapsed" in done.stdout
+    assert "5s elapsed" in done.stdout  # formatted under 90s: stays in seconds
     assert "~10s estimated" in done.stdout
-    assert "50%" in done.stdout
+    # Wall-clock derived: a few ms of test overhead is fine, a wrong formula
+    # (or an invented estimate) is not.
+    percent = int(re.search(r", (\d+)%\)", done.stdout).group(1))
+    assert 50 <= percent <= 55
 
 
 def test_build_view_completed_reports_duration(harness, fake_jenkins):
@@ -127,8 +131,6 @@ def test_build_start_plain_posts_build(harness, fake_jenkins):
 
 
 def test_build_stop_running_posts_stop(harness, fake_jenkins):
-    import time
-
     route_build(
         fake_jenkins,
         building=True,
