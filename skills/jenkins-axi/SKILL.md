@@ -133,7 +133,7 @@ through. `last` is the default build; a build number works too.
   quiet.
 - `build start` on a parameterized job without --param fails with the param
   list inline; `job view` shows each param's type. --param k=v, repeatable.
-- `build restart` re-runs with ONE predictable POST (replay for pipelines,
+- `build restart` re-runs with one triggering POST (replay for pipelines,
   otherwise the original parameters); it deliberately takes no overrides.
 - Mutations report what they did (queue id, message) and are safe to re-run
   after a CLEAR failure only: an ambiguous failure (timeout, 5xx) may
