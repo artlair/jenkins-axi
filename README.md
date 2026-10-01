@@ -1,19 +1,15 @@
 # jenkins-axi
 
-Agent-ergonomic Jenkins CLI, per the Agent eXperience Interface
-(<https://axi.md/>): TOON output, stated zeros, structured errors on stdout
-with the fix inline.
+Agent-ergonomic Jenkins CLI per the Agent eXperience Interface
+(<https://axi.md/>): token-efficient TOON output, stated zeros, structured
+errors on stdout with the fix inline.
 
 ## Scope
 
-**Monitor pipelines; start/restart/stop builds. Nothing else.**
-
-The REST client exposes `get()` plus a `post()` whose endpoints are a fixed
-whitelist in `client.py` (build, buildWithParameters, stop, replay). That is
-the entire write surface. Config changes and destructive actions, create or
-edit or delete jobs, config.xml, plugin/credential/node administration, the
-script console, are excluded by construction, not by policy. The whitelist is
-the reviewable boundary; an eyeball on four regexes covers it.
+Monitor pipelines; start, restart, and stop builds. Nothing else. The only
+write endpoints are a fixed whitelist in `client.py` (build,
+buildWithParameters, stop, replay), so job config, credentials, plugins,
+nodes, and the script console are out of reach by construction.
 
 ## Install
 
@@ -23,30 +19,25 @@ uv tool install git+https://github.com/artlair/jenkins-axi
 
 ## Setup
 
-One-time: store the Jenkins URL, username, and API token in whatever Secret
-Service backend the desktop has (GNOME Keyring, KeePassXC, ...), via
-`secret-tool`, the freedesktop Secret Service CLI:
+Generate an API token in the Jenkins UI (your user -> Configure -> API
+Token), then run once:
 
 ```
 jenkins-axi setup --url http://jenkins.example.net:8080 --username youruser
-# API token read from stdin (paste, then Enter)
+# paste the token at the prompt (stdin, never argv)
 ```
 
-Generate the API token from the Jenkins UI: your user → Configure → API Token
-→ Add new Token (on Jenkins 2.346.x LTS it lives on the Configure page; the
-separate per-user Security page came in a later release). The token is read from stdin, never argv, and stored through
-`secret-tool` into the backend your session bus answers with. The CLI reads
-it back with `secret-tool search --all service jenkins-axi`, so any Secret
-Service provider works. Multiple servers: add entries with different `url`
-attributes and select with `--url`.
+The URL, username, and token are stored via `secret-tool` in whatever
+Secret Service backend the desktop provides (GNOME Keyring, KeePassXC, ...).
+Re-running setup for a url replaces its entry; to remove one:
+`secret-tool clear service jenkins-axi url <url>`. For multiple servers, run
+setup per server and select with `--url`.
 
 ## Usage
 
-Run bare `jenkins-axi`: it prints live state (reachable, auth, queue depth)
-and names its own subcommands. Per-subcommand `--help` is the authority on
-flags, so they are not copied here.
-
-Subcommands, noun-first:
+Run bare `jenkins-axi` first: it prints live state (reachable, auth, queue
+depth) and lists its subcommands. `jenkins-axi <cmd> --help` is the
+authority on flags.
 
 ```
 setup           store url + username + token via secret-tool
@@ -62,10 +53,10 @@ build stop      stop an in-progress build (honest no-op if completed)
 queue list      the build queue, with the "why" per item
 ```
 
-Job address: `project` or `project/branch` for multibranch jobs. Branch names
-often contain slashes (`bugfix%2FDEV-1217` as Jenkins lists them) and may be
-addressed raw (`Batman/bugfix/DEV-1217`); everything after the first `/` joins
-into one branch name, percent-encoding is passed through.
+Job addressing: `project`, or `project/branch` for multibranch jobs.
+Everything after the first `/` joins into one branch name, so slashes in
+branch names work as-is (`Batman/bugfix/DEV-1217`). `last` is the default
+build; a build number works too.
 
 ## Development
 
