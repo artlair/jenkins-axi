@@ -47,17 +47,24 @@ def route_build(
 def test_build_view_running_reports_elapsed_vs_estimate(harness, fake_jenkins):
     now_ms = int(time.time() * 1000)
     route_build(
-        fake_jenkins, building=True, timestamp_ms=now_ms - 5_000, estimated_ms=10_000
+        fake_jenkins, building=True, timestamp_ms=now_ms - 30_000, estimated_ms=60_000
     )
     done = harness.run("build", "view", "atlas/feature/wip")
     assert done.returncode == 0
     assert "RUNNING" in done.stdout
-    assert "5s elapsed" in done.stdout  # formatted under 90s: stays in seconds
-    assert "~10s estimated" in done.stdout
-    # Wall-clock derived: a few ms of test overhead is fine, a wrong formula
-    # (or an invented estimate) is not.
+    assert "~60s estimated" in done.stdout
+    # Wall-clock derived, so elapsed carries the CLI's own startup time on top
+    # of the 30s the fake reports, and a loaded CI host can add whole seconds
+    # of it. So the assertions bind to what the CLI itself printed, not to a
+    # host-speed assumption: elapsed only has to cover the fake's 30s and stay
+    # under the 90s formatting cliff, and the percent must equal
+    # int(100 * elapsed_ms / 60_000) for the elapsed_ms inside the printed
+    # second, [elapsed*1000, (elapsed+1)*1000).
+    elapsed = int(re.search(r"\((\d+)s elapsed", done.stdout).group(1))
+    assert 30 <= elapsed < 90  # formatted under 90s: stays in seconds
     percent = int(re.search(r", (\d+)%\)", done.stdout).group(1))
-    assert 50 <= percent <= 70  # two interpreter startups of budget
+    assert 100 * elapsed * 1000 // 60_000 <= percent
+    assert percent <= ((elapsed + 1) * 100_000 - 1) // 60_000
 
 
 def test_build_view_completed_reports_duration(harness, fake_jenkins):
